@@ -1,23 +1,62 @@
 // 酷乐光年 token 自动同步到青龙面板
 // Quantumult X 重写脚本（script-request-header）
-// API：$task.fetch / $notify / $done
+// 设计要点：
+//   1. 请求最多阻塞 3 秒，超时无条件放行，绝不影响小程序
+//   2. 同一 token 只同步一次（$prefs 记录），不重复刷面板
+//   3. 失败提醒 10 分钟内最多一次，且附具体错误原因
 
 var panelUrl = 'http://192.168.6.114:5700';
 var panelUser = 'bmfy';
 var panelPass = 'Dangopi314';
 
+var finished = false;
+function finish() {
+  if (finished) return;
+  finished = true;
+  $done();
+}
+setTimeout(finish, 3000);
+
+function prefsGet(key, def) {
+  try {
+    if (typeof $prefs !== 'undefined' && $prefs && typeof $prefs.valueForKey === 'function') {
+      var v = $prefs.valueForKey(key);
+      if (v !== undefined && v !== null && v !== '') return v;
+    }
+  } catch (e) {}
+  return def;
+}
+
+function prefsSet(key, value) {
+  try {
+    if (typeof $prefs !== 'undefined' && $prefs && typeof $prefs.setValueForKey === 'function') {
+      $prefs.setValueForKey(value, key);
+    }
+  } catch (e) {}
+}
+
 var headers = $request.headers || {};
 var authHeader = headers['Authorization'] || headers['authorization'] || '';
 
 if (authHeader.indexOf('Token ') !== 0) {
-  console.log('未找到 Authorization 头，跳过');
-  $done();
+  finish();
+} else if (authHeader === prefsGet('kule_last_synced', '')) {
+  // 该 token 已同步过，直接放行
+  finish();
 } else {
-  sync(authHeader);
+  var now = Date.now();
+  var lastTry = parseInt(prefsGet('kule_last_try', '0'), 10) || 0;
+  if (now - lastTry < 20000) {
+    // 20 秒内刚尝试过，跳过本次
+    finish();
+  } else {
+    prefsSet('kule_last_try', String(now));
+    sync(authHeader);
+  }
 }
 
 function sync(token) {
-  console.log('捕获到 token: ' + token.slice(0, 30) + '...');
+  console.log('同步 token: ' + token.slice(0, 24) + '...');
 
   // 1. 登录青龙面板
   $task.fetch({
@@ -29,8 +68,8 @@ function sync(token) {
     var loginData = JSON.parse(loginResponse.body);
     if (loginData.code !== 200) {
       console.log('面板登录失败: ' + JSON.stringify(loginData));
-      $notify('酷乐光年', 'token 同步失败', '面板登录失败');
-      $done();
+      failNotify('面板登录失败');
+      finish();
       return;
     }
     var panelToken = loginData.data.token;
@@ -93,21 +132,30 @@ function sync(token) {
       });
     });
   }).then(function (updateResponse) {
-    if (!updateResponse) {
-      return;
-    }
+    if (!updateResponse) return;
     var updateData = JSON.parse(updateResponse.body);
     if (updateData.code === 200) {
+      prefsSet('kule_last_synced', token);
       console.log('token 同步成功');
       $notify('酷乐光年', 'token 已自动同步', '签到将使用最新 token');
     } else {
       console.log('token 同步失败: ' + JSON.stringify(updateData));
-      $notify('酷乐光年', 'token 同步失败', updateData.message || '未知错误');
+      failNotify(updateData.message || '更新失败');
     }
-    $done();
+    finish();
   }, function (reason) {
-    console.log('请求异常: ' + JSON.stringify(reason));
-    $notify('酷乐光年', 'token 同步失败', '网络错误');
-    $done();
+    var err = (reason && reason.error) ? String(reason.error) : '未知错误';
+    console.log('请求异常: ' + err);
+    failNotify(err);
+    finish();
   });
+}
+
+function failNotify(message) {
+  var now = Date.now();
+  var lastFail = parseInt(prefsGet('kule_last_fail', '0'), 10) || 0;
+  if (now - lastFail > 600000) {
+    prefsSet('kule_last_fail', String(now));
+    $notify('酷乐光年', 'token 同步失败', message);
+  }
 }
