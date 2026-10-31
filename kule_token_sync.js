@@ -1,7 +1,7 @@
 // Quantumult X 脚本：酷乐光年 token 自动同步到青龙面板
-// 使用 $httpClient 发请求，$request 读取请求头，$notification 推送通知
+// 使用 $task.fetch() 发请求，$request 读取请求头，$notify 推送通知
 
-const panelUrl = 'http://192.168.6.114:5700'; // 青龙面板地址（如有 Tailscale 请改成 Tailscale IP）
+const panelUrl = 'http://192.168.6.114:5700';
 const panelUser = 'bmfy';
 const panelPass = 'Dangopi314';
 
@@ -18,22 +18,16 @@ function syncToken() {
   
   // 登录面板
   const loginBody = JSON.stringify({ username: panelUser, password: panelPass });
-  $httpClient.post({
+  $task.fetch({
+    method: 'POST',
     url: `${panelUrl}/api/user/login`,
     headers: { 'Content-Type': 'application/json' },
     body: loginBody
-  }, (error, response, data) => {
-    if (error) {
-      console.log('面板登录请求失败:', error);
-      $notification.post('酷乐光年', 'token 同步失败', '面板连接失败');
-      $done({});
-      return;
-    }
-    
-    const loginData = JSON.parse(data);
+  }).then(response => {
+    const loginData = JSON.parse(response.body);
     if (loginData.code !== 200) {
       console.log('面板登录失败:', JSON.stringify(loginData));
-      $notification.post('酷乐光年', 'token 同步失败', '面板登录失败');
+      $notify('酷乐光年', 'token 同步失败', '面板登录失败');
       $done({});
       return;
     }
@@ -42,17 +36,12 @@ function syncToken() {
     console.log('面板登录成功');
     
     // 获取当前 KULE_SIGN_HEADERS
-    $httpClient.get({
+    return $task.fetch({
+      method: 'GET',
       url: `${panelUrl}/api/envs?searchValue=KULE_SIGN_HEADERS`,
       headers: { Authorization: `Bearer ${panelToken}` }
-    }, (error, response, data) => {
-      if (error) {
-        console.log('获取环境变量失败:', error);
-        $done({});
-        return;
-      }
-      
-      const envsData = JSON.parse(data);
+    }).then(envResponse => {
+      const envsData = JSON.parse(envResponse.body);
       const existing = envsData.data?.find(e => e.name === 'KULE_SIGN_HEADERS');
       
       const newHeaders = JSON.stringify({
@@ -60,52 +49,42 @@ function syncToken() {
         'User-Agent': 'Mozilla/5.0 (iPad; CPU OS 16_5_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 MicroMessenger/8.0.79(0x18004f31) NetType/WIFI Language/zh_CN'
       });
       
-      // 更新环境变量
       const updateHeaders = {
         Authorization: `Bearer ${panelToken}`,
         'Content-Type': 'application/json'
       };
       
       if (existing) {
-        // PUT 更新
-        $httpClient.put({
+        return $task.fetch({
+          method: 'PUT',
           url: `${panelUrl}/api/envs`,
           headers: updateHeaders,
           body: JSON.stringify({ id: existing.id, name: 'KULE_SIGN_HEADERS', value: newHeaders })
-        }, (error, response, data) => {
-          handleUpdateResult(error, data);
         });
       } else {
-        // POST 创建
-        $httpClient.post({
+        return $task.fetch({
+          method: 'POST',
           url: `${panelUrl}/api/envs`,
           headers: updateHeaders,
           body: JSON.stringify([{ name: 'KULE_SIGN_HEADERS', value: newHeaders }])
-        }, (error, response, data) => {
-          handleUpdateResult(error, data);
         });
       }
     });
-  });
-}
-
-function handleUpdateResult(error, data) {
-  if (error) {
-    console.log('更新环境变量失败:', error);
-    $notification.post('酷乐光年', 'token 同步失败', '更新请求失败');
+  }).then(updateResponse => {
+    const updateData = JSON.parse(updateResponse.body);
+    if (updateData.code === 200) {
+      console.log('token 同步成功');
+      $notify('酷乐光年', 'token 已自动同步', '签到将使用最新 token');
+    } else {
+      console.log('token 同步失败:', JSON.stringify(updateData));
+      $notify('酷乐光年', 'token 同步失败', updateData.message || '请检查');
+    }
     $done({});
-    return;
-  }
-  
-  const updateData = JSON.parse(data);
-  if (updateData.code === 200) {
-    console.log('✅ token 同步成功');
-    $notification.post('酷乐光年', 'token 已自动同步', '签到将使用最新 token');
-  } else {
-    console.log('❌ token 同步失败:', JSON.stringify(updateData));
-    $notification.post('酷乐光年', 'token 同步失败', updateData.message || '请检查');
-  }
-  $done({});
+  }).catch(error => {
+    console.log('请求失败:', error);
+    $notify('酷乐光年', 'token 同步失败', '网络错误');
+    $done({});
+  });
 }
 
 syncToken();
