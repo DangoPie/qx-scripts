@@ -1,90 +1,113 @@
-// Quantumult X 脚本：酷乐光年 token 自动同步到青龙面板
-// 使用 $task.fetch() 发请求，$request 读取请求头，$notify 推送通知
+// 酷乐光年 token 自动同步到青龙面板
+// Quantumult X 重写脚本（script-request-header）
+// API：$task.fetch / $notify / $done
 
-const panelUrl = 'http://192.168.6.114:5700';
-const panelUser = 'bmfy';
-const panelPass = 'Dangopi314';
+var panelUrl = 'http://192.168.6.114:5700';
+var panelUser = 'bmfy';
+var panelPass = 'Dangopi314';
 
-function syncToken() {
-  const authHeader = $request.headers.Authorization;
-  if (!authHeader || !authHeader.startsWith('Token ')) {
-    console.log('未找到有效的 Authorization 头，跳过');
-    $done({});
-    return;
-  }
-  
-  const token = authHeader;
-  console.log('捕获到 token:', token.slice(0, 30) + '...');
-  
-  // 登录面板
-  const loginBody = JSON.stringify({ username: panelUser, password: panelPass });
+var headers = $request.headers || {};
+var authHeader = headers['Authorization'] || headers['authorization'] || '';
+
+if (authHeader.indexOf('Token ') !== 0) {
+  console.log('未找到 Authorization 头，跳过');
+  $done();
+} else {
+  sync(authHeader);
+}
+
+function sync(token) {
+  console.log('捕获到 token: ' + token.slice(0, 30) + '...');
+
+  // 1. 登录青龙面板
   $task.fetch({
+    url: panelUrl + '/api/user/login',
     method: 'POST',
-    url: `${panelUrl}/api/user/login`,
     headers: { 'Content-Type': 'application/json' },
-    body: loginBody
-  }).then(response => {
-    const loginData = JSON.parse(response.body);
+    body: JSON.stringify({ username: panelUser, password: panelPass })
+  }).then(function (loginResponse) {
+    var loginData = JSON.parse(loginResponse.body);
     if (loginData.code !== 200) {
-      console.log('面板登录失败:', JSON.stringify(loginData));
+      console.log('面板登录失败: ' + JSON.stringify(loginData));
       $notify('酷乐光年', 'token 同步失败', '面板登录失败');
-      $done({});
+      $done();
       return;
     }
-    
-    const panelToken = loginData.data.token;
+    var panelToken = loginData.data.token;
     console.log('面板登录成功');
-    
-    // 获取当前 KULE_SIGN_HEADERS
+
+    // 2. 查询现有环境变量
     return $task.fetch({
+      url: panelUrl + '/api/envs?searchValue=KULE_SIGN_HEADERS',
       method: 'GET',
-      url: `${panelUrl}/api/envs?searchValue=KULE_SIGN_HEADERS`,
-      headers: { Authorization: `Bearer ${panelToken}` }
-    }).then(envResponse => {
-      const envsData = JSON.parse(envResponse.body);
-      const existing = envsData.data?.find(e => e.name === 'KULE_SIGN_HEADERS');
-      
-      const newHeaders = JSON.stringify({
-        Authorization: token,
-        'User-Agent': 'Mozilla/5.0 (iPad; CPU OS 16_5_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 MicroMessenger/8.0.79(0x18004f31) NetType/WIFI Language/zh_CN'
-      });
-      
-      const updateHeaders = {
-        Authorization: `Bearer ${panelToken}`,
-        'Content-Type': 'application/json'
-      };
-      
+      headers: { Authorization: 'Bearer ' + panelToken }
+    }).then(function (envResponse) {
+      var envsData = JSON.parse(envResponse.body);
+      var list = envsData.data || [];
+      var existing = null;
+      for (var i = 0; i < list.length; i++) {
+        if (list[i].name === 'KULE_SIGN_HEADERS') {
+          existing = list[i];
+          break;
+        }
+      }
+
+      // 保留原有 headers（如 User-Agent），只更新 Authorization
+      var headersObj = { Authorization: token };
+      if (existing) {
+        try {
+          var old = JSON.parse(existing.value);
+          if (old && typeof old === 'object') {
+            old.Authorization = token;
+            headersObj = old;
+          }
+        } catch (e) {
+          // 旧值不是合法 JSON，直接用新对象
+        }
+      }
+      var newValue = JSON.stringify(headersObj);
+
       if (existing) {
         return $task.fetch({
+          url: panelUrl + '/api/envs',
           method: 'PUT',
-          url: `${panelUrl}/api/envs`,
-          headers: updateHeaders,
-          body: JSON.stringify({ id: existing.id, name: 'KULE_SIGN_HEADERS', value: newHeaders })
-        });
-      } else {
-        return $task.fetch({
-          method: 'POST',
-          url: `${panelUrl}/api/envs`,
-          headers: updateHeaders,
-          body: JSON.stringify([{ name: 'KULE_SIGN_HEADERS', value: newHeaders }])
+          headers: {
+            Authorization: 'Bearer ' + panelToken,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            id: existing.id,
+            name: 'KULE_SIGN_HEADERS',
+            value: newValue
+          })
         });
       }
+      return $task.fetch({
+        url: panelUrl + '/api/envs',
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer ' + panelToken,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify([{ name: 'KULE_SIGN_HEADERS', value: newValue }])
+      });
     });
-  }).then(updateResponse => {
-    const updateData = JSON.parse(updateResponse.body);
+  }).then(function (updateResponse) {
+    if (!updateResponse) {
+      return;
+    }
+    var updateData = JSON.parse(updateResponse.body);
     if (updateData.code === 200) {
       console.log('token 同步成功');
       $notify('酷乐光年', 'token 已自动同步', '签到将使用最新 token');
     } else {
-      console.log('token 同步失败:', JSON.stringify(updateData));
-      $notify('酷乐光年', 'token 同步失败', updateData.message || '请检查');
+      console.log('token 同步失败: ' + JSON.stringify(updateData));
+      $notify('酷乐光年', 'token 同步失败', updateData.message || '未知错误');
     }
-    $done({});
-  }).catch(error => {
-    console.log('请求失败:', error);
+    $done();
+  }, function (reason) {
+    console.log('请求异常: ' + JSON.stringify(reason));
     $notify('酷乐光年', 'token 同步失败', '网络错误');
-    $done({});
+    $done();
   });
 }
-
-syncToken();
