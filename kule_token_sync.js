@@ -1,9 +1,9 @@
 // 酷乐光年 token 自动同步到青龙面板
 // Quantumult X 重写脚本（script-request-header）
 // 设计要点：
-//   1. 请求最多阻塞 3 秒，超时无条件放行，绝不影响小程序
-//   2. 同一 token 只同步一次（$prefs 记录），不重复刷面板
-//   3. 失败提醒 10 分钟内最多一次，且附具体错误原因
+//   1. 面板 bearer 缓存在 $prefs（有效期约 20 天），跳过约 3 秒的慢速登录
+//   2. 请求最多阻塞 10 秒，超时无条件放行，绝不影响小程序
+//   3. 同一 token 只同步一次，失败提醒 10 分钟限频且附具体错误
 
 var panelUrl = 'http://192.168.6.114:5700';
 var panelUser = 'bmfy';
@@ -17,9 +17,9 @@ function finish() {
   $done();
 }
 setTimeout(function () {
-  if (!settled) console.log('6 秒兜底触发，强制放行请求');
+  if (!settled) console.log('10 秒兜底触发，强制放行请求');
   finish();
-}, 6000);
+}, 10000);
 
 function prefsGet(key, def) {
   try {
@@ -43,15 +43,18 @@ var headers = $request.headers || {};
 var authHeader = headers['Authorization'] || headers['authorization'] || '';
 
 if (authHeader.indexOf('Token ') !== 0) {
+  settled = true;
   finish();
 } else if (authHeader === prefsGet('kule_last_synced', '')) {
   // 该 token 已同步过，直接放行
+  settled = true;
   finish();
 } else {
   var now = Date.now();
   var lastTry = parseInt(prefsGet('kule_last_try', '0'), 10) || 0;
   if (now - lastTry < 20000) {
     // 20 秒内刚尝试过，跳过本次
+    settled = true;
     finish();
   } else {
     prefsSet('kule_last_try', String(now));
@@ -59,84 +62,103 @@ if (authHeader.indexOf('Token ') !== 0) {
   }
 }
 
-function sync(token) {
-  console.log('同步 token: ' + token.slice(0, 24) + '...');
-
-  // 1. 登录青龙面板
-  $task.fetch({
+function login() {
+  return $task.fetch({
     url: panelUrl + '/api/user/login',
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ username: panelUser, password: panelPass })
-  }).then(function (loginResponse) {
-    var loginData = JSON.parse(loginResponse.body);
-    if (loginData.code !== 200) {
-      console.log('面板登录失败: ' + JSON.stringify(loginData));
-      failNotify('面板登录失败');
-      finish();
-      return;
+  }).then(function (resp) {
+    var d = JSON.parse(resp.body);
+    if (d.code !== 200) {
+      console.log('面板登录失败: ' + JSON.stringify(d));
+      throw new Error('登录失败: ' + (d.message || d.code));
     }
-    var panelToken = loginData.data.token;
+    prefsSet('kule_panel_bearer', d.data.token);
     console.log('面板登录成功');
+    return d.data.token;
+  });
+}
 
-    // 2. 查询现有环境变量
-    return $task.fetch({
-      url: panelUrl + '/api/envs?searchValue=KULE_SIGN_HEADERS',
-      method: 'GET',
-      headers: { Authorization: 'Bearer ' + panelToken }
-    }).then(function (envResponse) {
-      var envsData = JSON.parse(envResponse.body);
-      var list = envsData.data || [];
-      var existing = null;
-      for (var i = 0; i < list.length; i++) {
-        if (list[i].name === 'KULE_SIGN_HEADERS') {
-          existing = list[i];
-          break;
-        }
-      }
+function getEnvs(bearer) {
+  return $task.fetch({
+    url: panelUrl + '/api/envs?searchValue=KULE_SIGN_HEADERS',
+    method: 'GET',
+    headers: { Authorization: 'Bearer ' + bearer }
+  });
+}
 
-      // 保留原有 headers（如 User-Agent），只更新 Authorization
-      var headersObj = { Authorization: token };
-      if (existing) {
-        try {
-          var old = JSON.parse(existing.value);
-          if (old && typeof old === 'object') {
-            old.Authorization = token;
-            headersObj = old;
-          }
-        } catch (e) {
-          // 旧值不是合法 JSON，直接用新对象
-        }
-      }
-      var newValue = JSON.stringify(headersObj);
+function putEnv(bearer, existing, newValue) {
+  var opts = {
+    url: panelUrl + '/api/envs',
+    headers: {
+      Authorization: 'Bearer ' + bearer,
+      'Content-Type': 'application/json'
+    }
+  };
+  if (existing) {
+    opts.method = 'PUT';
+    opts.body = JSON.stringify({ id: existing.id, name: 'KULE_SIGN_HEADERS', value: newValue });
+  } else {
+    opts.method = 'POST';
+    opts.body = JSON.stringify([{ name: 'KULE_SIGN_HEADERS', value: newValue }]);
+  }
+  return $task.fetch(opts);
+}
 
-      if (existing) {
-        return $task.fetch({
-          url: panelUrl + '/api/envs',
-          method: 'PUT',
-          headers: {
-            Authorization: 'Bearer ' + panelToken,
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({
-            id: existing.id,
-            name: 'KULE_SIGN_HEADERS',
-            value: newValue
-          })
+function sync(token) {
+  console.log('同步 token: ' + token.slice(0, 24) + '...');
+
+  var cached = prefsGet('kule_panel_bearer', '');
+  var envStep;
+  if (cached) {
+    envStep = getEnvs(cached).then(function (resp) {
+      if (resp.statusCode === 401) {
+        console.log('bearer 失效，重新登录');
+        return login().then(function (bearer) {
+          return getEnvs(bearer);
         });
       }
-      return $task.fetch({
-        url: panelUrl + '/api/envs',
-        method: 'POST',
-        headers: {
-          Authorization: 'Bearer ' + panelToken,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify([{ name: 'KULE_SIGN_HEADERS', value: newValue }])
-      });
+      return resp;
     });
+  } else {
+    envStep = login().then(function (bearer) {
+      return getEnvs(bearer);
+    });
+  }
+
+  envStep.then(function (envResponse) {
+    if (envResponse.statusCode !== 200) {
+      throw new Error('查询环境变量失败 HTTP ' + envResponse.statusCode);
+    }
+    var envsData = JSON.parse(envResponse.body);
+    var list = envsData.data || [];
+    var existing = null;
+    for (var i = 0; i < list.length; i++) {
+      if (list[i].name === 'KULE_SIGN_HEADERS') {
+        existing = list[i];
+        break;
+      }
+    }
+
+    // 保留原有 headers（如 User-Agent），只更新 Authorization
+    var headersObj = { Authorization: token };
+    if (existing) {
+      try {
+        var old = JSON.parse(existing.value);
+        if (old && typeof old === 'object') {
+          old.Authorization = token;
+          headersObj = old;
+        }
+      } catch (e) {
+        // 旧值不是合法 JSON，直接用新对象
+      }
+    }
+    var newValue = JSON.stringify(headersObj);
+
+    var bearer = prefsGet('kule_panel_bearer', '');
+    return putEnv(bearer, existing, newValue);
   }).then(function (updateResponse) {
-    if (!updateResponse) return;
     settled = true;
     var updateData = JSON.parse(updateResponse.body);
     if (updateData.code === 200) {
@@ -150,7 +172,12 @@ function sync(token) {
     finish();
   }, function (reason) {
     settled = true;
-    var err = (reason && reason.error) ? String(reason.error) : '未知错误';
+    var err = '未知错误';
+    if (reason && reason.error) {
+      err = String(reason.error);
+    } else if (reason && reason.message) {
+      err = String(reason.message);
+    }
     console.log('请求异常: ' + err);
     failNotify(err);
     finish();
