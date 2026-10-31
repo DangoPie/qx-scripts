@@ -10,12 +10,16 @@ var panelUser = 'bmfy';
 var panelPass = 'Dangopi314';
 
 var finished = false;
+var settled = false;
 function finish() {
   if (finished) return;
   finished = true;
   $done();
 }
-setTimeout(finish, 3000);
+setTimeout(function () {
+  if (!settled) console.log('6 秒兜底触发，强制放行请求');
+  finish();
+}, 6000);
 
 function prefsGet(key, def) {
   try {
@@ -133,6 +137,7 @@ function sync(token) {
     });
   }).then(function (updateResponse) {
     if (!updateResponse) return;
+    settled = true;
     var updateData = JSON.parse(updateResponse.body);
     if (updateData.code === 200) {
       prefsSet('kule_last_synced', token);
@@ -144,6 +149,7 @@ function sync(token) {
     }
     finish();
   }, function (reason) {
+    settled = true;
     var err = (reason && reason.error) ? String(reason.error) : '未知错误';
     console.log('请求异常: ' + err);
     failNotify(err);
