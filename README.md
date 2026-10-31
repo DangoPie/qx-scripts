@@ -27,10 +27,12 @@
 
 ```ini
 [Rewrite]
-^https://pw\.gzych\.vip/.* script-path=https://raw.githubusercontent.com/DangoPie/qx-scripts/main/kule_token_sync.js, requires-body=true, tag=酷乐光年token同步
+^https://pw\.gzych\.vip/.* script-path=https://cdn.jsdelivr.net/gh/DangoPie/qx-scripts@main/kule_token_sync.js, requires-body=true, tag=酷乐光年token同步
 ```
 
 或者在 QX 的"重写"界面手动添加上述规则。
+
+**推荐 URL**：使用 jsDelivr CDN（`https://cdn.jsdelivr.net/gh/...`）比 GitHub raw URL 更稳定。
 
 ### 步骤 2：修改脚本中的面板地址（如需要）
 
