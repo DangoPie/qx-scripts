@@ -34,7 +34,7 @@
 
 ```ini
 [rewrite_local]
-^https://pw\.gzych\.vip/.* url script-request-header https://raw.githubusercontent.com/DangoPie/qx-scripts/main/kule_token_sync.js#panelUrls=http://你的面板IP:5700|http://备用地址:5700&panelUser=你的用户名&panelPass=你的密码
+^https://pw\.gzych\.vip/.* url script-request-header https://raw.githubusercontent.com/DangoPie/qx-scripts/main/kule_token_sync.js#panelUrls=http://你的面板IP:5700&panelUser=你的用户名&panelPass=你的密码
 ```
 
 方式 B（方便，但本仓库公开）：在 QX「重写」页面的「引用资源」中添加 `kule.conf` 的 URL（`https://raw.githubusercontent.com/DangoPie/qx-scripts/<commit>/kule.conf`）。注意该文件内含面板账号密码，任何人可见，请尽快修改面板密码或改用方式 A。
