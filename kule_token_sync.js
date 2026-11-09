@@ -1,13 +1,38 @@
 // 酷乐光年 token 自动同步到青龙面板
 // Quantumult X 重写脚本（script-request-header）
+//
+// 所有配置均通过重写规则 URL 的 hash 参数传入（QX 的"环境变量"机制，
+// 通过 $environment.variables 读取），脚本内不写死任何 IP / 账号 / 密码。
+// 参数：
+//   panelUrls  多个面板地址，用 | 分隔，按顺序尝试；最近成功的地址会缓存并优先使用
+//   panelUser  面板用户名
+//   panelPass  面板密码
+//
+// 规则示例（把 <commit> 换成实际提交哈希）：
+// ^https://pw\.gzych\.vip/.* url script-request-header https://raw.githubusercontent.com/DangoPie/qx-scripts/<commit>/kule_token_sync.js#panelUrls=http://你的面板IP:5700|http://备用地址:5700&panelUser=你的用户名&panelPass=你的密码
+//
 // 设计要点：
 //   1. 面板 bearer 缓存在 $prefs（有效期约 20 天），跳过约 3 秒的慢速登录
 //   2. 请求最多阻塞 10 秒，超时无条件放行，绝不影响小程序
 //   3. 同一 token 只同步一次，失败提醒 10 分钟限频且附具体错误
+//   4. 多面板地址依次容错，最近可用的地址缓存后优先使用
 
-var panelUrl = 'http://你的面板IP:5700';
-var panelUser = '你的用户名';
-var panelPass = 'REDACTED';
+var envVars = {};
+try {
+  if (typeof $environment !== 'undefined' && $environment && $environment.variables) {
+    envVars = $environment.variables;
+  }
+} catch (e) {}
+
+var panelUrls = [];
+var rawUrls = envVars.panelUrls || '';
+var urlParts = rawUrls.split('|');
+for (var i = 0; i < urlParts.length; i++) {
+  var u = urlParts[i].trim();
+  if (u) panelUrls.push(u);
+}
+var panelUser = envVars.panelUser || '';
+var panelPass = envVars.panelPass || '';
 
 var finished = false;
 var settled = false;
@@ -39,32 +64,85 @@ function prefsSet(key, value) {
   } catch (e) {}
 }
 
-var headers = $request.headers || {};
-var authHeader = headers['Authorization'] || headers['authorization'] || '';
-
-if (authHeader.indexOf('Token ') !== 0) {
-  settled = true;
-  finish();
-} else if (authHeader === prefsGet('kule_last_synced', '')) {
-  // 该 token 已同步过，直接放行
-  settled = true;
-  finish();
-} else {
+function failNotify(message) {
   var now = Date.now();
-  var lastTry = parseInt(prefsGet('kule_last_try', '0'), 10) || 0;
-  if (now - lastTry < 20000) {
-    // 20 秒内刚尝试过，跳过本次
-    settled = true;
-    finish();
-  } else {
-    prefsSet('kule_last_try', String(now));
-    sync(authHeader);
+  var lastFail = parseInt(prefsGet('kule_last_fail', '0'), 10) || 0;
+  if (now - lastFail > 600000) {
+    prefsSet('kule_last_fail', String(now));
+    $notify('酷乐光年', 'token 同步失败', message);
   }
 }
 
-function login() {
+// 最近一次成功的面板地址，优先复用
+var activeUrl = prefsGet('kule_panel_url', '');
+
+function orderedUrls() {
+  var list = [];
+  if (activeUrl) list.push(activeUrl);
+  for (var j = 0; j < panelUrls.length; j++) {
+    if (panelUrls[j] !== activeUrl) list.push(panelUrls[j]);
+  }
+  return list;
+}
+
+// 依次尝试每个面板地址执行 action(url)；成功则缓存该地址
+function withPanel(action) {
+  var urls = orderedUrls();
+  function attempt(k) {
+    if (k >= urls.length) {
+      return Promise.reject(new Error('所有面板地址均无法连接'));
+    }
+    var url = urls[k];
+    return action(url).then(function (result) {
+      if (url !== activeUrl) {
+        activeUrl = url;
+        prefsSet('kule_panel_url', url);
+      }
+      return result;
+    }, function (reason) {
+      var err = '未知错误';
+      if (reason && reason.error) err = String(reason.error);
+      else if (reason && reason.message) err = String(reason.message);
+      else err = String(reason);
+      console.log('面板 ' + url + ' 连接失败(' + err + ')，尝试下一个地址');
+      return attempt(k + 1);
+    });
+  }
+  return attempt(0);
+}
+
+if (panelUrls.length === 0 || !panelUser || !panelPass) {
+  settled = true;
+  failNotify('未配置面板参数：请在重写规则 URL 后加 #panelUrls=地址1|地址2&panelUser=账号&panelPass=密码');
+  finish();
+} else {
+  var headers = $request.headers || {};
+  var authHeader = headers['Authorization'] || headers['authorization'] || '';
+
+  if (authHeader.indexOf('Token ') !== 0) {
+    settled = true;
+    finish();
+  } else if (authHeader === prefsGet('kule_last_synced', '')) {
+    // 该 token 已同步过，直接放行
+    settled = true;
+    finish();
+  } else {
+    var now = Date.now();
+    var lastTry = parseInt(prefsGet('kule_last_try', '0'), 10) || 0;
+    if (now - lastTry < 20000) {
+      // 20 秒内刚尝试过，跳过本次
+      settled = true;
+      finish();
+    } else {
+      prefsSet('kule_last_try', String(now));
+      sync(authHeader);
+    }
+  }
+}
+
+function login(url) {
   return $task.fetch({
-    url: panelUrl + '/api/user/login',
+    url: url + '/api/user/login',
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ username: panelUser, password: panelPass })
@@ -80,17 +158,17 @@ function login() {
   });
 }
 
-function getEnvs(bearer) {
+function getEnvs(url, bearer) {
   return $task.fetch({
-    url: panelUrl + '/api/envs?searchValue=KULE_SIGN_HEADERS',
+    url: url + '/api/envs?searchValue=KULE_SIGN_HEADERS',
     method: 'GET',
     headers: { Authorization: 'Bearer ' + bearer }
   });
 }
 
-function putEnv(bearer, existing, newValue) {
+function putEnv(url, bearer, existing, newValue) {
   var opts = {
-    url: panelUrl + '/api/envs',
+    url: url + '/api/envs',
     headers: {
       Authorization: 'Bearer ' + bearer,
       'Content-Type': 'application/json'
@@ -112,18 +190,28 @@ function sync(token) {
   var cached = prefsGet('kule_panel_bearer', '');
   var envStep;
   if (cached) {
-    envStep = getEnvs(cached).then(function (resp) {
+    envStep = withPanel(function (url) {
+      return getEnvs(url, cached);
+    }).then(function (resp) {
       if (resp.statusCode === 401) {
         console.log('bearer 失效，重新登录');
-        return login().then(function (bearer) {
-          return getEnvs(bearer);
+        return withPanel(function (url) {
+          return login(url);
+        }).then(function (bearer) {
+          return withPanel(function (url) {
+            return getEnvs(url, bearer);
+          });
         });
       }
       return resp;
     });
   } else {
-    envStep = login().then(function (bearer) {
-      return getEnvs(bearer);
+    envStep = withPanel(function (url) {
+      return login(url);
+    }).then(function (bearer) {
+      return withPanel(function (url) {
+        return getEnvs(url, bearer);
+      });
     });
   }
 
@@ -134,9 +222,9 @@ function sync(token) {
     var envsData = JSON.parse(envResponse.body);
     var list = envsData.data || [];
     var existing = null;
-    for (var i = 0; i < list.length; i++) {
-      if (list[i].name === 'KULE_SIGN_HEADERS') {
-        existing = list[i];
+    for (var m = 0; m < list.length; m++) {
+      if (list[m].name === 'KULE_SIGN_HEADERS') {
+        existing = list[m];
         break;
       }
     }
@@ -157,7 +245,9 @@ function sync(token) {
     var newValue = JSON.stringify(headersObj);
 
     var bearer = prefsGet('kule_panel_bearer', '');
-    return putEnv(bearer, existing, newValue);
+    return withPanel(function (url) {
+      return putEnv(url, bearer, existing, newValue);
+    });
   }).then(function (updateResponse) {
     settled = true;
     var updateData = JSON.parse(updateResponse.body);
@@ -182,13 +272,4 @@ function sync(token) {
     failNotify(err);
     finish();
   });
-}
-
-function failNotify(message) {
-  var now = Date.now();
-  var lastFail = parseInt(prefsGet('kule_last_fail', '0'), 10) || 0;
-  if (now - lastFail > 600000) {
-    prefsSet('kule_last_fail', String(now));
-    $notify('酷乐光年', 'token 同步失败', message);
-  }
 }
