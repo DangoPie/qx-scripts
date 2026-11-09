@@ -9,7 +9,7 @@
 //   panelPass  面板密码
 //
 // 规则示例（把 <commit> 换成实际提交哈希）：
-// ^https://pw\.gzych\.vip/.* url script-request-header https://raw.githubusercontent.com/DangoPie/qx-scripts/<commit>/kule_token_sync.js#panelUrls=http://你的面板IP:5700|http://备用地址:5700&panelUser=你的用户名&panelPass=你的密码
+// ^https://pw\.gzych\.vip/.* url script-request-header https://raw.githubusercontent.com/DangoPie/qx-scripts/main/kule_token_sync.js#panelUrls=http://你的面板IP:5700|http://备用地址:5700&panelUser=你的用户名&panelPass=你的密码
 //
 // 设计要点：
 //   1. 面板 bearer 缓存在 $prefs（有效期约 20 天），跳过约 3 秒的慢速登录
